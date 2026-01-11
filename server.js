@@ -7,36 +7,55 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
+// 初始化 Gemini
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
-// *** 修改点 1：使用带版本号的精确名字 ***
-// 尝试使用最稳定的版本号
-const MODEL_NAME = "gemini-1.5-flash-001"; 
-
-const model = genAI.getGenerativeModel({ 
-  model: MODEL_NAME, 
-  generationConfig: {
-    responseMimeType: "application/json"
-  }
-});
+// 这里我们先填一个最通用的名字，如果错了，下面的代码会自动查正确的
+let CURRENT_MODEL_NAME = "gemini-1.5-flash"; 
 
 const SYSTEM_PROMPT = `
-你是一位中国非物质文化遗产剪纸大师，也是一位 SVG 代码专家。
-任务：根据用户描述，编写一段 SVG 代码来呈现剪纸效果。
-严格要求：纯 JSON 格式，包含 "svg_code" 字段。只用红色 (#D90000) 和透明背景。viewBox="0 0 512 512"。
+你是一位 SVG 代码专家。请生成纯 JSON 格式的 SVG 代码。
+字段名必须是 "svg_code"。
+内容：正红色(#D90000)的剪纸风格图案。
 `;
+
+// 辅助函数：查询你的 API Key 到底能用哪些模型
+async function getValidModels(apiKey) {
+  try {
+    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`);
+    const data = await response.json();
+    if (data.models) {
+      // 过滤出所有名字里带 gemini 的模型
+      return data.models
+        .filter(m => m.name.includes('gemini'))
+        .map(m => m.name.replace('models/', ''))
+        .join(', ');
+    }
+    return "无法获取模型列表";
+  } catch (e) {
+    return "查询失败";
+  }
+}
 
 app.post('/api/generate', async (req, res) => {
   try {
     const { prompt } = req.body;
-    console.log(`收到请求: ${prompt}, 正在使用模型: ${MODEL_NAME}`);
-
-    const finalPrompt = `${SYSTEM_PROMPT}\n\n用户想要的内容是：${prompt}`;
     
+    // 1. 配置模型
+    const model = genAI.getGenerativeModel({ 
+      model: CURRENT_MODEL_NAME, 
+      generationConfig: { responseMimeType: "application/json" }
+    });
+
+    console.log(`尝试使用模型 ${CURRENT_MODEL_NAME} 生成: ${prompt}`);
+    const finalPrompt = `${SYSTEM_PROMPT}\n用户需求：${prompt}`;
+
+    // 2. 尝试生成
     const result = await model.generateContent(finalPrompt);
     const response = await result.response;
     const text = response.text();
     
+    // 3. 解析 SVG
     let svgCode = "";
     try {
       const jsonResponse = JSON.parse(text);
@@ -46,43 +65,31 @@ app.post('/api/generate', async (req, res) => {
       if (match) svgCode = match[0];
     }
 
-    if (!svgCode) throw new Error("AI 未能生成有效的 SVG 代码");
+    if (!svgCode) throw new Error("生成了内容但找不到SVG代码");
 
     const base64Svg = Buffer.from(svgCode).toString('base64');
-    const dataUrl = `data:image/svg+xml;base64,${base64Svg}`;
-
-    res.json({ success: true, imageUrl: dataUrl });
+    res.json({ success: true, imageUrl: `data:image/svg+xml;base64,${base64Svg}` });
 
   } catch (error) {
-    console.error("生成失败:", error);
-    res.status(500).json({ success: false, error: error.message });
+    console.error("生成出错:", error.message);
+
+    // *** 关键修改：如果是因为模型找不到 (404)，我们现场查一下能用啥 ***
+    if (error.message.includes('404') || error.message.includes('Not Found')) {
+      const validModels = await getValidModels(process.env.GEMINI_API_KEY);
+      
+      // 把查到的结果直接返回给前端报错框
+      res.json({ 
+        success: false, 
+        error: `模型名不对。你的 Key 支持的模型有：${validModels}。请把 server.js 里的 CURRENT_MODEL_NAME 改成其中一个。` 
+      });
+    } else {
+      // 其他错误
+      res.json({ success: false, error: error.message });
+    }
   }
 });
 
-// *** 修改点 2：启动时自动打印可用模型列表 ***
-// 这样如果失败了，看日志就知道你该用哪个名字了
-async function listAvailableModels() {
-  try {
-    // 注意：这里使用 fetch 直接查询，绕过 SDK 可能的版本限制
-    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${process.env.GEMINI_API_KEY}`);
-    const data = await response.json();
-    console.log("\n====== 你的 API Key 支持的模型列表 ======");
-    if (data.models) {
-      data.models.forEach(m => {
-        if (m.name.includes('gemini')) console.log(`✅ ${m.name.replace('models/', '')}`);
-      });
-    } else {
-      console.log("无法获取模型列表:", data);
-    }
-    console.log("========================================\n");
-  } catch (e) {
-    console.error("自检失败:", e);
-  }
-}
-
 const PORT = 3000;
 app.listen(PORT, () => {
-  console.log(`服务已启动: http://localhost:${PORT}`);
-  // 启动时查一下户口
-  listAvailableModels();
+  console.log(`自诊断服务已启动: http://localhost:${PORT}`);
 });
