@@ -10,7 +10,7 @@ app.use(express.json({ limit: '50mb' }));
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 // 默认先试一个最稳的，如果不行，下面的代码会救场
-let MODEL_NAME = "gemini-1.5-flash"; 
+let MODEL_NAME = "gemini-1.5-pro"; 
 
 const SYSTEM_PROMPT = `
 你是一位 SVG 代码专家。请生成纯 JSON 格式的 SVG 代码。
