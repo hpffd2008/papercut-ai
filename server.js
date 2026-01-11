@@ -11,7 +11,7 @@ const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 // 使用 Gemini 1.5 Pro，但这次我们要求它输出 JSON（纯文本）
 const model = genAI.getGenerativeModel({ 
-  model: "gemini-1.5-pro",
+  model: "gemini-1.5-flash",
   generationConfig: {
     responseMimeType: "application/json" // 关键修改：告诉 AI 我要数据，不要图片文件
   }
