@@ -9,75 +9,64 @@ app.use(express.json({ limit: '50mb' }));
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
-// 默认先试一个最稳的，如果不行，下面的代码会救场
-let MODEL_NAME = "gemini-1.5-pro"; 
+// *** 关键修改 1：尝试使用 1206 实验版（在你的列表里！）***
+// 如果这个还不行，就改回 "gemini-1.5-flash-latest"
+const MODEL_NAME = "gemini-exp-1206"; 
+
+const model = genAI.getGenerativeModel({ 
+  model: MODEL_NAME,
+  // *** 关键修改 2：删除了 responseMimeType ***
+  // 不强制要求 JSON 模式，避免 404 兼容性问题
+});
 
 const SYSTEM_PROMPT = `
-你是一位 SVG 代码专家。请生成纯 JSON 格式的 SVG 代码。
-字段名必须是 "svg_code"。内容：正红色(#D90000)的剪纸风格图案。
+你是一位 SVG 代码专家。
+任务：请根据用户描述，编写一段 SVG 代码。
+要求：
+1. 直接输出 <svg>...</svg> 代码块，不要包含 markdown 标记（如 \`\`\`xml）。
+2. 只使用正红色 (#D90000) 和透明背景。
+3. 必须包含 viewBox="0 0 512 512"。
+4. 确保代码是纯文本格式，不要包裹在 JSON 里。
 `;
 
 app.post('/api/generate', async (req, res) => {
-  console.log("----------------------------------------");
-  console.log("1. 收到请求，准备进行【权限自检】...");
-
   try {
-    // *** 强制自检步骤：直接问 Google 我能用啥 ***
-    // 这一步会把你的“家底”全部打印在 Render 日志里，别错过！
-    const listReq = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${process.env.GEMINI_API_KEY}`);
-    const listData = await listReq.json();
-    
-    console.log("2. Google 返回的【可用模型列表】：");
-    if (listData.models) {
-        listData.models.forEach(m => {
-            // 只打印 gemini 系列
-            if (m.name.includes('gemini')) {
-                console.log(`   ✅ ${m.name.replace('models/', '')}`);
-            }
-        });
-    } else {
-        console.log("   ❌ 无法获取列表，可能 API Key 无效或未开通 Google AI Studio 服务。");
-        console.log("   错误详情:", JSON.stringify(listData));
-    }
-    console.log("----------------------------------------");
+    const { prompt } = req.body;
+    console.log(`正在使用模型 ${MODEL_NAME} 生成: ${prompt}`);
 
-    // 正常生成流程
-    const model = genAI.getGenerativeModel({ 
-      model: MODEL_NAME, 
-      generationConfig: { responseMimeType: "application/json" }
-    });
-
-    const finalPrompt = `${SYSTEM_PROMPT}\n用户需求：${req.body.prompt}`;
-    const result = await model.generateContent(finalPrompt);
+    const result = await model.generateContent(`${SYSTEM_PROMPT}\n用户需求：${prompt}`);
     const response = await result.response;
     const text = response.text();
     
-    // 解析 SVG
+    // *** 关键修改 3：使用正则表达式暴力提取 SVG ***
+    // 这种方式最稳，不管 AI 返回什么格式，只要有 svg 标签就能抓出来
     let svgCode = "";
-    try {
-      const jsonResponse = JSON.parse(text);
-      svgCode = jsonResponse.svg_code;
-    } catch (e) {
-      const match = text.match(/<svg[\s\S]*?<\/svg>/);
-      if (match) svgCode = match[0];
+    const match = text.match(/<svg[\s\S]*?<\/svg>/);
+    if (match) {
+      svgCode = match[0];
+    } else {
+      // 如果没提取到，可能 AI 还是输出了 JSON，尝试解析一下
+      try {
+        const json = JSON.parse(text);
+        svgCode = json.svg_code || json.svg;
+      } catch (e) {}
     }
 
-    if (!svgCode) throw new Error("SVG 代码提取失败");
+    if (!svgCode) {
+        console.error("AI 返回原始内容:", text); // 方便在日志里看它到底回了啥
+        throw new Error("未能提取到有效的 SVG 代码");
+    }
 
     const base64Svg = Buffer.from(svgCode).toString('base64');
     res.json({ success: true, imageUrl: `data:image/svg+xml;base64,${base64Svg}` });
 
   } catch (error) {
-    console.error("生成出错:", error.message);
-    res.json({ 
-      success: false, 
-      // 告诉前端去哪里看答案
-      error: "模型调用失败。请去 Render 网页看 Logs (日志)，我已把所有可用的模型名字打印在那里了！" 
-    });
+    console.error("生成失败:", error.message);
+    res.json({ success: false, error: error.message });
   }
 });
 
 const PORT = 3000;
 app.listen(PORT, () => {
-  console.log(`侦探服务已启动: http://localhost:${PORT}`);
+  console.log(`兼容版服务已启动: http://localhost:${PORT}`);
 });
