@@ -1,63 +1,88 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
-const { GoogleGenerativeAI } = require('@google/generative-ai');
+// 注意：我们不再引入 @google/generative-ai SDK 了
+// 直接使用 Node.js 自带的 fetch
 
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-
-// *** 终极修正：使用 gemini-1.5-pro ***
-// 理由：根据你 15:44 的截图，这是唯一一个返回 400 (已连接) 而不是 404 的模型
-// 它有免费层级（虽然慢一点点，每分钟限 2 次，但绝对可用）
-const MODEL_NAME = "gemini-1.5-pro"; 
-
-const model = genAI.getGenerativeModel({ 
-  model: MODEL_NAME,
-  // *** 关键：彻底删除 responseMimeType ***
-  // 之前的 400 报错就是因为它，删掉后模型就会乖乖听话
-});
+// 1. 定义模型：这里用最稳的 gemini-1.5-flash
+// 如果想换 pro，就把下面这行改成 "gemini-1.5-pro"
+const MODEL_NAME = "gemini-1.5-flash";
 
 const SYSTEM_PROMPT = `
-你是一位 SVG 代码专家。
-任务：根据用户描述，直接编写一段 SVG 代码。
-
+你是一位 SVG 编程专家。
+任务：请根据用户描述，编写一段 SVG 代码。
 严格要求：
-1. 不要输出 markdown 标记（如 \`\`\`xml）。
-2. 不要输出任何解释性文字。
-3. 直接以 <svg 开头，以 </svg> 结尾。
-4. 颜色使用正红色 (#D90000) 和透明背景。
-5. 必须包含 viewBox="0 0 512 512"。
+1. 直接输出代码，不要包裹在 markdown (\`\`\`) 里。
+2. 不要任何解释文字。
+3. 颜色使用正红色 (#D90000) 和透明背景。
+4. 必须包含 viewBox="0 0 512 512"。
 `;
 
 app.post('/api/generate', async (req, res) => {
   try {
     const { prompt } = req.body;
-    console.log(`[终极尝试] 正在使用 ${MODEL_NAME} 生成: ${prompt}`);
+    console.log(`[原生请求模式] 正在呼叫 ${MODEL_NAME}...`);
 
-    const result = await model.generateContent(`${SYSTEM_PROMPT}\n用户需求：${prompt}`);
-    const response = await result.response;
-    const text = response.text();
-    
-    // 暴力提取 SVG，不管 AI 说了什么废话，只抓代码
-    const match = text.match(/<svg[\s\S]*?<\/svg>/);
-    if (!match) {
-        console.error("AI 返回内容:", text);
-        throw new Error("生成成功但未找到SVG标签");
+    // 2. 构造原生 HTTP 请求地址
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL_NAME}:generateContent?key=${process.env.GEMINI_API_KEY}`;
+
+    // 3. 构造请求体 (Payload)
+    // 我们把 System Prompt 和 User Prompt 合并在一起发过去，这样兼容性最强
+    const payload = {
+      contents: [{
+        parts: [{
+          text: `${SYSTEM_PROMPT}\n\n用户需求：${prompt}`
+        }]
+      }]
+    };
+
+    // 4. 发送原生请求
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(payload)
+    });
+
+    const data = await response.json();
+
+    // 5. 错误处理：如果 Google 返回错误，直接打印出来
+    if (!response.ok) {
+      console.error("Google API 报错详情:", JSON.stringify(data, null, 2));
+      throw new Error(data.error?.message || "Google API 请求失败");
     }
 
-    const base64Svg = Buffer.from(match[0]).toString('base64');
+    // 6. 提取文本结果
+    const aiText = data.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (!aiText) {
+      throw new Error("AI 返回了空内容");
+    }
+
+    // 7. 暴力提取 SVG (不管 AI 怎么回答，只抓代码)
+    const match = aiText.match(/<svg[\s\S]*?<\/svg>/);
+    if (!match) {
+      console.error("AI 原始回复:", aiText);
+      throw new Error("未能从 AI 回复中提取到 SVG 标签");
+    }
+
+    const svgCode = match[0];
+    const base64Svg = Buffer.from(svgCode).toString('base64');
+    
+    // 成功！
     res.json({ success: true, imageUrl: `data:image/svg+xml;base64,${base64Svg}` });
 
   } catch (error) {
-    console.error("生成失败:", error.message);
+    console.error("后端处理出错:", error.message);
     res.json({ success: false, error: error.message });
   }
 });
 
 const PORT = 3000;
 app.listen(PORT, () => {
-  console.log(`终极修复服务已启动: http://localhost:${PORT}`);
+  console.log(`原生 Fetch 服务已启动 (端口 ${PORT})`);
 });
